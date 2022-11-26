@@ -1303,3 +1303,122 @@ int srs_chunk_header_c3(int perfer_cid, uint32_t timestamp, char* cache, int nb_
     return (int)(p - cache);
 }
 
+
+
+
+SrsMiniBitsReader::SrsMiniBitsReader(uint8_t *data, unsigned int size)
+    : data_(data)
+    , size_(size)
+    , reservoir_(0)
+    , bits_left_(0)
+{
+    ;
+}
+
+SrsMiniBitsReader::~SrsMiniBitsReader()
+{
+    ;
+}
+
+uint32_t SrsMiniBitsReader::get_bits(size_t n)
+{
+    uint32_t result = 0;
+    while (n > 0) {
+
+        if (bits_left_ == 0)
+            fill_reservoir();
+
+        if (bits_left() == 0) {
+            break;
+        }
+
+        uint32_t  m = n;
+        if (m > bits_left_){
+            m = bits_left_;
+        }
+
+        result = (result << m) | (reservoir_ >> (32 - m));
+        reservoir_ <<= m;
+        bits_left_ -= m;
+
+        n -= m;
+    }
+
+    return result;
+}
+
+uint64_t SrsMiniBitsReader::get_bits64(size_t n)
+{
+    uint64_t  result = 0;
+    
+    while (n > 0) {
+        if (bits_left_ == 0)
+            fill_reservoir();
+
+        if (bits_left() == 0) {
+            break;
+        }
+
+        uint32_t  m = n;
+        if (m > bits_left_)
+            m = bits_left_;
+
+        result = (result << m) | (reservoir_ >> (32 - m));
+        reservoir_ <<= m;
+        bits_left_ -= m;
+
+        n -= m;
+    }
+
+    return result;
+}
+
+
+void SrsMiniBitsReader::skip_bits(uint32_t n)
+{
+    while (n > 32){
+        get_bits(32);
+        n -= 32;
+    }
+
+    if (n > 0)
+        get_bits(n);
+}
+
+void SrsMiniBitsReader::put_bits(uint32_t  x, size_t n)
+{
+    while (bits_left_ + n > 32){
+        bits_left_ -= 8;
+        --data_;
+        ++size_;
+    }
+
+    reservoir_ = (reservoir_ >> n) | (x << (32 - n));
+    bits_left_ += n;
+}
+
+uint32_t SrsMiniBitsReader::bits_left (void) const
+{
+    return (size_ << 3) + bits_left_;
+}
+
+uint8_t* SrsMiniBitsReader::data() const
+{
+    return data_ - ((bits_left_ + 7) >> 3);
+}
+
+void SrsMiniBitsReader::fill_reservoir(void)
+{
+    reservoir_ = 0;
+    uint32_t i;
+    for (i = 0; size_ > 0 && i < 4; ++i)
+    {
+        reservoir_ = (reservoir_ << 8) | *data_;
+
+        ++data_;
+        --size_;
+    }
+
+    bits_left_ = 8 * i;
+    reservoir_ <<= 32 - bits_left_;
+}

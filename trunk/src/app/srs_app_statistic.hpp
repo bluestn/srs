@@ -70,6 +70,12 @@ public:
     SrsAvcProfile avc_profile;
     // The level_idc, ISO_IEC_14496-10-AVC-2003.pdf, page 45.
     SrsAvcLevel avc_level;
+
+#ifdef SRS_H265
+    SrsHevcProfile hevc_profile;
+    SrsHevcLevel hevc_level;
+#endif
+
     // The width and height in codec info.
     int width;
     int height;
@@ -159,6 +165,10 @@ public:
     // When got video info for stream.
     virtual srs_error_t on_video_info(SrsRequest* req, SrsVideoCodecId vcodec, SrsAvcProfile avc_profile,
         SrsAvcLevel avc_level, int width, int height);
+#ifdef SRS_H265
+    virtual srs_error_t on_video_info(SrsRequest* req, SrsVideoCodecId vcodec, SrsHevcProfile hevc_profile, 
+        SrsHevcLevel avc_level, int width, int height);
+#endif        
     // When got audio info for stream.
     virtual srs_error_t on_audio_info(SrsRequest* req, SrsAudioCodecId acodec, SrsAudioSampleRate asample_rate,
         SrsAudioChannels asound_type, SrsAacObjectType aac_object);

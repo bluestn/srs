@@ -410,11 +410,44 @@ string srs_avc_level2str(SrsAvcLevel level)
         case SrsAvcLevel_32: return "3.2";
         case SrsAvcLevel_4: return "4";
         case SrsAvcLevel_41: return "4.1";
+        case SrsAvcLevel_42: return "4.2";
         case SrsAvcLevel_5: return "5";
         case SrsAvcLevel_51: return "5.1";
         default: return "Other";
     }
 }
+
+#ifdef SRS_H265
+string srs_hevc_profile2str(SrsHevcProfile profile)
+{
+    switch (profile) {
+        case SrsHevcProfileMain: return "Main";
+        case SrsHevcProfileMain_10: return "Main(10)";
+        case SrsHevcProfileMain_Still_Picture: return "Main(Still Picture)";
+        case SrsHevcProfileRext: return "Rext";
+        default: return "Other";
+    }
+}
+
+string srs_hevc_level2str(SrsHevcLevel level)
+{
+    switch (level) {
+        case SrsHevcLevel_1:   return "1";
+        case SrsHevcLevel_2:   return "2";
+        case SrsHevcLevel_21:  return "2.1";
+        case SrsHevcLevel_3:   return "3";
+        case SrsHevcLevel_31:  return "3.1";
+        case SrsHevcLevel_4:   return "4";
+        case SrsHevcLevel_41:  return "4.1";
+        case SrsHevcLevel_5:   return "5";
+        case SrsHevcLevel_51:  return "5.1";
+        case SrsHevcLevel_6:   return "6";
+        case SrsHevcLevel_61:  return "6.1";
+        case SrsHevcLevel_62:  return "6.2";
+        default:               return "Other";
+    }
+}
+#endif
 
 SrsSample::SrsSample()
 {
@@ -523,6 +556,9 @@ SrsVideoCodecConfig::SrsVideoCodecConfig()
     NAL_unit_length = 0;
     avc_profile = SrsAvcProfileReserved;
     avc_level = SrsAvcLevelReserved;
+
+    hevc_profile = SrsHevcProfileReserved;
+    hevc_level = SrsHevcLevelReserved;    
     
     payload_format = SrsAvcPayloadFormatGuess;
 }
@@ -879,9 +915,70 @@ srs_error_t SrsFormat::video_avc_demux(SrsBuffer* stream, int64_t timestamp)
 // LCOV_EXCL_START
 
 #ifdef SRS_H265
+static
+bool get_golomb_ue_long(SrsMiniBitsReader& bs, uint32_t& value)
+{
+    uint32_t prefix = 0;
+
+
+    while (bs.bits_left() > 0 && bs.get_bits(1) == 0) {
+        prefix++;
+    }
+
+    if (prefix == 0) {
+        value = 0;
+        return true;
+    }
+    if (bs.bits_left() < prefix){
+        return false;
+    }
+
+    value = 1;
+    for (uint32_t i = 0; i < prefix; i++) {
+        if (bs.get_bits(1)) {
+            value = (value << 1) | 1;
+        }else{
+            value = value << 1;
+        }
+    }
+
+    value--;
+
+    return true;
+}
+
+static int unescape_nalu_data(uint8_t *data, int len)
+{
+    int zero_count = 0;
+
+    uint8_t *data_end = data + len;
+
+    uint8_t* out_p = data;
+
+    for (uint8_t* p = data; p < data_end; p++){
+
+        if (*p == 0){
+            zero_count++;
+        }else{
+            if (zero_count == 2 && *p == 3){
+                zero_count = 0;
+                continue;
+            }
+            zero_count = 0;
+        }
+
+        *out_p++ = *p;
+    }
+
+    return out_p - data;
+}
+
+
 // Parse the hevc vps/sps/pps
 srs_error_t SrsFormat::hevc_demux_hvcc(SrsBuffer* stream)
 {
+    srs_error_t err = srs_success;
+
     int avc_extra_size = stream->size() - stream->pos();
     if (avc_extra_size > 0) {
         char *copy_stream_from = stream->data() + stream->pos();
@@ -991,8 +1088,335 @@ srs_error_t SrsFormat::hevc_demux_hvcc(SrsBuffer* stream)
         dec_conf_rec_p->nalu_vec.push_back(hevc_unit);
     }
 
+    err = hevc_parse_sps();
+    if (err != srs_success){
+        return srs_error_new(ERROR_HLS_DECODE_ERROR, "Parse hevc sps error");
+    }
+
+    err = hevc_parse_vps();
+    if (err != srs_success){
+        return srs_error_new(ERROR_HLS_DECODE_ERROR, "Parse hevc vps error");
+    }
+
+    err = hevc_parse_pps();
+    if (err != srs_success){
+        return srs_error_new(ERROR_HLS_DECODE_ERROR, "Parse hevc pps error");
+    }
+
     return srs_success;
 }
+
+srs_error_t SrsFormat::hevc_parse_sps()
+{
+
+    srs_error_t err = srs_success;
+
+    char* data = NULL;
+    int len;
+    err = hevc_sps_data(data, len);
+
+    if (err != srs_success){
+        return srs_error_wrap(err, "hevc_parse_sps");
+    }
+
+    uint8_t* buf = new uint8_t[len];
+    memcpy(buf, data, len);
+    len = unescape_nalu_data(buf,len);
+
+    SrsMiniBitsReader bs(buf, (unsigned int)len);
+    SrsAutoFreeA(uint8_t, buf);
+
+    if ( bs.bits_left() < 24 ){
+        return srs_error_new(ERROR_HLS_DECODE_ERROR, "hevc_parse_sps");
+    }
+
+    bs.skip_bits(16);
+
+    uint8_t vps_id, max_sub_layers, temporal_id_nesting_flag;
+    SRS_UNUSED_VARIABLE(vps_id);
+    SRS_UNUSED_VARIABLE(temporal_id_nesting_flag);
+
+    vps_id = (uint8_t)bs.get_bits(4);
+    max_sub_layers = (uint8_t)bs.get_bits(3);
+    max_sub_layers++;
+
+    if (bs.get_bits(1)){
+        temporal_id_nesting_flag = 1;
+    }else{
+        temporal_id_nesting_flag = 0;
+    }
+
+    // profile tier level
+    uint8_t profile_space, tier_flag, profile_idc;
+    SRS_UNUSED_VARIABLE(profile_space);
+    SRS_UNUSED_VARIABLE(tier_flag);
+
+    profile_space = (uint8_t)bs.get_bits(2);
+    tier_flag = (uint8_t)bs.get_bits(1);
+    profile_idc = (uint8_t)bs.get_bits(5);
+
+    if (profile_idc == 1)           // FF_PROFILE_HEVC_MAIN
+        vcodec->hevc_profile = SrsHevcProfileMain;
+    else if (profile_idc == 2)      // FF_PROFILE_HEVC_MAIN_10
+        vcodec->hevc_profile = SrsHevcProfileMain_10;
+    else if (profile_idc == 3)      // FF_PROFILE_HEVC_MAIN_STILL_PICTURE)
+        vcodec->hevc_profile = SrsHevcProfileMain_Still_Picture;
+    else if (profile_idc == 4)      // FF_PROFILE_HEVC_REXT)
+        vcodec->hevc_profile = SrsHevcProfileRext;
+    else
+        ;
+        //return srs_error_new(ERROR_HLS_DECODE_ERROR, "hevc_parse_sps: parse profile_idc failed.");
+
+    if (bs.bits_left() < 80){
+        return srs_error_new(ERROR_HLS_DECODE_ERROR, "hevc_parse_sps");
+    }
+
+    // profile_capatibility_flag 32 bits
+    uint32_t profile_capatibility_flag;
+    SRS_UNUSED_VARIABLE(profile_capatibility_flag);
+
+    profile_capatibility_flag = bs.get_bits(32);
+
+    uint8_t progressive_source_flag, interlaced_source_flag, non_packed_constraint_flag, frame_only_constraint_flag;
+    SRS_UNUSED_VARIABLE(progressive_source_flag);
+    SRS_UNUSED_VARIABLE(interlaced_source_flag);
+    SRS_UNUSED_VARIABLE(non_packed_constraint_flag);
+    SRS_UNUSED_VARIABLE(frame_only_constraint_flag);
+
+
+    progressive_source_flag    = bs.get_bits(1) ? 1 : 0;
+    interlaced_source_flag     = bs.get_bits(1) ? 1 : 0;
+    non_packed_constraint_flag = bs.get_bits(1) ? 1 : 0;
+    frame_only_constraint_flag = bs.get_bits(1) ? 1 : 0;
+
+    // skip general_reserved_zero_44bits
+    bs.skip_bits(44);
+
+    if (bs.bits_left() < (uint32_t)(8 + (max_sub_layers-1) * 4)){
+        return srs_error_new(ERROR_HLS_DECODE_ERROR, "hevc_parse_sps");
+    }
+
+    uint8_t general_level_idc;
+    general_level_idc = (uint8_t)bs.get_bits(8);
+    vcodec->hevc_level = (SrsHevcLevel)general_level_idc;
+
+    uint8_t sub_layer_profile_present_flag[6] = { 0 };
+    uint8_t sub_layer_level_present_flag[6] = { 0 };
+    for (int i = 0; i < max_sub_layers-1; i++)
+    {
+        sub_layer_profile_present_flag[i] = bs.get_bits(1) ? 1 : 0;
+        sub_layer_level_present_flag[i]   = bs.get_bits(1) ? 1 : 0;
+    }
+
+    if (max_sub_layers-1 > 0){
+        for (int i = max_sub_layers-1; i < 8; i++){
+            bs.skip_bits(2);
+        }
+    }
+
+    for (int i = 0; i < max_sub_layers - 1; i++) {
+        if (sub_layer_profile_present_flag[i]){
+
+            if ( bs.bits_left() < 88 ){
+                return srs_error_new(ERROR_HLS_DECODE_ERROR, "hevc_parse_sps");
+            }
+
+            uint8_t sub_layer_profile_space, sub_layer_tier_flag, sub_layer_profile_idc;
+            uint32_t sub_layer_profile_compatibility_flag;
+            uint8_t sub_layer_progressive_source_flag, sub_layer_interlaced_source_flag, sub_layer_non_packed_constraint_flag;
+            uint8_t sub_layer_frame_only_constraint_flag;
+            
+            SRS_UNUSED_VARIABLE(sub_layer_profile_space);
+            SRS_UNUSED_VARIABLE(sub_layer_tier_flag);
+            SRS_UNUSED_VARIABLE(sub_layer_profile_idc);
+            SRS_UNUSED_VARIABLE(sub_layer_profile_compatibility_flag);
+            SRS_UNUSED_VARIABLE(sub_layer_progressive_source_flag);
+            SRS_UNUSED_VARIABLE(sub_layer_interlaced_source_flag);
+            SRS_UNUSED_VARIABLE(sub_layer_non_packed_constraint_flag);
+            SRS_UNUSED_VARIABLE(sub_layer_frame_only_constraint_flag);
+
+            sub_layer_profile_space = (uint8_t)bs.get_bits(2);
+            sub_layer_tier_flag = (uint8_t)bs.get_bits(1);
+            sub_layer_profile_idc = (uint8_t)bs.get_bits(5);
+            sub_layer_profile_compatibility_flag = bs.get_bits(32);
+            sub_layer_progressive_source_flag = (uint8_t)bs.get_bits(1);
+            sub_layer_interlaced_source_flag = (uint8_t)bs.get_bits(1);
+            sub_layer_non_packed_constraint_flag = (uint8_t)bs.get_bits(1);
+            sub_layer_frame_only_constraint_flag = (uint8_t)bs.get_bits(1);
+            bs.skip_bits(44);
+        }
+
+        if (sub_layer_level_present_flag[i]){
+            if ( bs.bits_left() < 8 ){
+                return srs_error_new(ERROR_HLS_DECODE_ERROR, "hevc_parse_sps");
+            }
+            uint8_t sub_layer_level_idc;
+            SRS_UNUSED_VARIABLE(sub_layer_level_idc);
+
+            sub_layer_level_idc = (uint8_t)bs.get_bits(8);
+        }
+    }
+
+    // end of ptl
+
+    uint32_t sps_id, chroma_format_idc, width, height;
+    if (!get_golomb_ue_long(bs, sps_id)){
+        return srs_error_new(ERROR_HLS_DECODE_ERROR, "hevc_parse_sps: parse sps_id failed.");
+    }
+
+    if (!get_golomb_ue_long(bs, chroma_format_idc)){
+        return srs_error_new(ERROR_HLS_DECODE_ERROR, "hevc_parse_sps: parse chroma_format_idc failed.");
+    }
+
+    if (!get_golomb_ue_long(bs, width)){
+        return srs_error_new(ERROR_HLS_DECODE_ERROR, "hevc_parse_sps: parse width failed.");
+    }
+
+    if (!get_golomb_ue_long(bs, height)){
+        return srs_error_new(ERROR_HLS_DECODE_ERROR, "hevc_parse_sps: parse height failed.");
+    }
+
+    vcodec->width  = width;
+    vcodec->height = height;
+
+    return err;
+}
+
+
+srs_error_t SrsFormat::hevc_parse_vps()
+{
+    srs_error_t err = srs_success;
+    // TODO: have no usage now, need implement later
+    return err;
+}
+
+srs_error_t SrsFormat::hevc_parse_pps()
+{
+    srs_error_t err = srs_success;
+    // TODO: have no usage now, need implement later
+    return err;
+}
+
+srs_error_t SrsFormat::hevc_vps_data(char*& data_p, int& len) {
+    srs_error_t err = srs_success;
+
+    for (size_t index = 0; index < vcodec->hevc_dec_conf_record_.nalu_vec.size(); index++) {
+        SrsHevcHvccNalu& nt = vcodec->hevc_dec_conf_record_.nalu_vec[index];
+
+        if (nt.nal_unit_type == SrsHevcNaluType_VPS) {
+            if (nt.nal_data_vec.size() > 0) {
+                data_p = (char*)(nt.nal_data_vec[0].nal_unit_data.data());
+                len = nt.nal_data_vec[0].nal_unit_length;
+                break;
+            }
+        }
+    }
+    return err;
+}
+
+srs_error_t SrsFormat::hevc_sps_data(char*& data_p, int& len) {
+    srs_error_t err = srs_success;
+
+    for (size_t index = 0; index < vcodec->hevc_dec_conf_record_.nalu_vec.size(); index++) {
+        SrsHevcHvccNalu& nt = vcodec->hevc_dec_conf_record_.nalu_vec[index];
+
+        if (nt.nal_unit_type == SrsHevcNaluType_SPS) {
+            if (nt.nal_data_vec.size() > 0) {
+                data_p = (char*)(nt.nal_data_vec[0].nal_unit_data.data());
+                len = nt.nal_data_vec[0].nal_unit_length;
+                break;
+            }
+        }
+    }
+    return err;
+}
+
+srs_error_t SrsFormat::hevc_pps_data(char*& data_p, int& len) {
+    srs_error_t err = srs_success;
+
+    for (size_t index = 0; index < vcodec->hevc_dec_conf_record_.nalu_vec.size(); index++) {
+
+        SrsHevcHvccNalu& nt = vcodec->hevc_dec_conf_record_.nalu_vec[index];
+        if (nt.nal_unit_type == SrsHevcNaluType_PPS) {
+            if (nt.nal_data_vec.size() > 0) {
+                data_p = (char*)(nt.nal_data_vec[0].nal_unit_data.data());
+                len = nt.nal_data_vec[0].nal_unit_length;
+                break;
+            }
+        }
+    }
+    return err;
+}
+
+srs_error_t SrsFormat::hevc_demux_ibmf_format(SrsBuffer* stream) {
+    srs_error_t err = srs_success;
+    int PictureLength = stream->size() - stream->pos();
+    int nal_len_size = 0;
+    int nal_count = 0;
+
+    nal_len_size = vcodec->hevc_dec_conf_record_.length_size_minus_one;
+
+    // 5.3.4.2.1 Syntax, ISO_IEC_14496-15-AVC-format-2012.pdf, page 16
+    // 5.2.4.1 AVC decoder configuration record
+    // 5.2.4.1.2 Semantics
+    // The value of this field shall be one of 0, 1, or 3 corresponding to a
+    // length encoded with 1, 2, or 4 bytes, respectively.
+    srs_assert(nal_len_size != 2);
+
+    // 5.3.4.2.1 Syntax, ISO_IEC_14496-15-AVC-format-2012.pdf, page 20
+    for (int i = 0; i < PictureLength; nal_count++) {
+        if (i + nal_len_size >= PictureLength) {
+            break;
+        }
+        // unsigned int((NAL_unit_length+1)*8) NALUnitLength;
+        if (!stream->require(nal_len_size + 1)) {
+            srs_error("nal_len_size:%d, PictureLength:%d, i:%d, 0x%02x.",
+                nal_len_size, PictureLength, i);
+            return srs_error_new(ERROR_HLS_DECODE_ERROR, "hevc decode NALU size %d  %d  %d %d",
+                                 i, nal_len_size, PictureLength, nal_count+1 );
+        }
+        int32_t NALUnitLength = 0;
+
+        if (nal_len_size == 3) {
+            NALUnitLength = stream->read_4bytes();
+        } else if (nal_len_size == 1) {
+            NALUnitLength = stream->read_2bytes();
+        } else {
+            NALUnitLength = stream->read_1bytes();
+        }
+
+        // maybe stream is invalid format.
+        // see: https://github.com/ossrs/srs/issues/183
+        if (NALUnitLength < 0) {
+            srs_error("pic length:%d, NAL_unit_length:%d, NALUnitLength:%d",
+                PictureLength, nal_len_size, NALUnitLength);
+            return srs_error_new(ERROR_HLS_DECODE_ERROR, "maybe stream is AnnexB format");
+        }
+
+        // NALUnit
+        if (!stream->require(NALUnitLength)) {
+            return srs_error_new(ERROR_HLS_DECODE_ERROR, "avc decode NALU data");
+        }
+
+        uint8_t* header_p = (uint8_t*)(stream->data() + stream->pos());
+		uint8_t nalu_type = (*header_p & 0x3f) >> 1;
+		bool irap = (SrsHevcNaluType_CODED_SLICE_BLA <= nalu_type) && (nalu_type <= SrsHevcNaluType_RESERVED_23);
+
+        if (irap) {
+            video->has_idr = true;
+        }
+
+        if ((err = video->add_sample(stream->data() + stream->pos(), NALUnitLength)) != srs_success) {
+            return srs_error_wrap(err, "avc add video frame");
+        }
+        stream->skip(NALUnitLength);
+
+        i += nal_len_size + 1 + NALUnitLength;
+    }
+
+    return err;
+}
+
 #endif
 
 srs_error_t SrsFormat::avc_demux_sps_pps(SrsBuffer* stream)
@@ -1368,33 +1792,57 @@ srs_error_t SrsFormat::video_nalu_demux(SrsBuffer* stream)
         return err;
     }
 
-    if (vcodec->id == SrsVideoCodecIdHEVC) {
+    srs_error_t (SrsFormat::*demux_ibmf_format_func)(SrsBuffer* stream);
+
+    if (vcodec->id == SrsVideoCodecIdAVC) {
+        demux_ibmf_format_func = &SrsFormat::avc_demux_ibmf_format;
 #ifdef SRS_H265
-        // TODO: FIXME: Might need to guess format?
-        return do_avc_demux_ibmf_format(stream);
-#else
-        return srs_error_new(ERROR_HEVC_DISABLED, "H.265 is disabled");
+    } else if (vcodec->id == SrsVideoCodecIdHEVC) {
+        demux_ibmf_format_func = &SrsFormat::hevc_demux_ibmf_format;
 #endif
+    } else {
+        return srs_error_wrap(err, "avc demux ibmf");
     }
 
-    // Parse the SPS/PPS in ANNEXB or IBMF format.
-    if (vcodec->payload_format == SrsAvcPayloadFormatIbmf) {
-        if ((err = avc_demux_ibmf_format(stream)) != srs_success) {
+    // guess for the first time.
+    if (vcodec->payload_format == SrsAvcPayloadFormatGuess) {
+        // One or more NALUs (Full frames are required)
+        // try  "AnnexB" from ISO_IEC_14496-10-AVC-2003.pdf, page 211.
+        if ((err = avc_demux_annexb_format(stream)) != srs_success) {
+            // stop try when system error.
+            if (err != srs_success){
+                srs_error_reset(err);
+            }
+
+            // try "ISO Base Media File Format" from ISO_IEC_14496-15-AVC-format-2012.pdf, page 20
+            if ((err = (this->*demux_ibmf_format_func)(stream)) != srs_success) {
+                return srs_error_wrap(err, "avc demux ibmf");
+            } else {
+                vcodec->payload_format = SrsAvcPayloadFormatIbmf;
+            }
+        } else {
+            vcodec->payload_format = SrsAvcPayloadFormatAnnexb;
+        }
+    } else if (vcodec->payload_format == SrsAvcPayloadFormatIbmf) {
+        // try "ISO Base Media File Format" from ISO_IEC_14496-15-AVC-format-2012.pdf, page 20
+        if ((err = (this->*demux_ibmf_format_func)(stream)) != srs_success) {
             return srs_error_wrap(err, "avc demux ibmf");
         }
-    } else if (vcodec->payload_format == SrsAvcPayloadFormatAnnexb) {
-        if ((err = avc_demux_annexb_format(stream)) != srs_success) {
-            return srs_error_wrap(err, "avc demux annexb");
-        }
     } else {
-        if ((err = try_annexb_first ? avc_demux_annexb_format(stream) : avc_demux_ibmf_format(stream)) == srs_success) {
-            vcodec->payload_format = try_annexb_first ? SrsAvcPayloadFormatAnnexb : SrsAvcPayloadFormatIbmf;
-        } else {
+        // One or more NALUs (Full frames are required)
+        // try  "AnnexB" from ISO_IEC_14496-10-AVC-2003.pdf, page 211.
+        if ((err = avc_demux_annexb_format(stream)) != srs_success) {
+            // ok, we guess out the payload is annexb, but maybe changed to ibmf.
+            if (srs_error_code(err) != ERROR_HLS_AVC_TRY_OTHERS) {
+                return srs_error_wrap(err, "avc demux annexb");
+            }
             srs_freep(err);
-            if ((err = try_annexb_first ? avc_demux_ibmf_format(stream) : avc_demux_annexb_format(stream)) == srs_success) {
-                vcodec->payload_format = try_annexb_first ? SrsAvcPayloadFormatIbmf : SrsAvcPayloadFormatAnnexb;
+
+            // try "ISO Base Media File Format" from ISO_IEC_14496-15-AVC-format-2012.pdf, page 20
+            if ((err = (this->*demux_ibmf_format_func)(stream)) != srs_success) {
+                return srs_error_wrap(err, "avc demux ibmf");
             } else {
-                return srs_error_wrap(err, "avc demux try_annexb_first=%d", try_annexb_first);
+                vcodec->payload_format = SrsAvcPayloadFormatIbmf;
             }
         }
     }

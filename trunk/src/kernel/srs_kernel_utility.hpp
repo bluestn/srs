@@ -167,5 +167,33 @@ extern int srs_chunk_header_c3(int perfer_cid, uint32_t timestamp, char* cache, 
     typedef int (*srs_gettimeofday_t) (struct timeval* tv, struct timezone* tz);
 #endif
 
-#endif
 
+
+// simple bits reader for codec parsing
+class SrsMiniBitsReader
+{
+public:
+	SrsMiniBitsReader(uint8_t *data, unsigned int size);
+    virtual ~SrsMiniBitsReader();
+public:    
+    uint32_t get_bits(size_t n);
+    uint64_t get_bits64(size_t n);
+    void skip_bits(uint32_t n);
+	
+    void put_bits(uint32_t  x, size_t n);
+    uint32_t bits_left (void) const;
+
+    uint8_t* data() const;
+    void fill_reservoir(void);
+
+protected:
+
+    uint8_t   *data_;
+    uint32_t   size_;
+    uint32_t   reservoir_;              // left-aligned bits
+    uint32_t   bits_left_;
+};
+
+
+
+#endif

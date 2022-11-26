@@ -1075,7 +1075,7 @@ srs_error_t SrsOriginHub::on_video(SrsSharedPtrMessage* shared_video, bool is_se
 #ifdef SRS_H265
         } else if (c->id == SrsVideoCodecIdHEVC) {
             // TODO: FIXME: Use the correct information for HEVC.
-            err = stat->on_video_info(req_, c->id, c->avc_profile, c->avc_level, c->width, c->height);
+            err = stat->on_video_info(req_, c->id, c->hevc_profile, c->hevc_level, c->width, c->height);
             srs_trace("%dB video sh, codec(%d)", msg->size, c->id);
 #endif
         }

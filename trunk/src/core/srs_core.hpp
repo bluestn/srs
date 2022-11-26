@@ -96,4 +96,6 @@ typedef _SrsContextId SrsContextId;
 typedef std::string SrsContextId;
 #endif
 
+
+#define SRS_UNUSED_VARIABLE(x)  (void)(x)
 #endif

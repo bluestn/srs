@@ -143,8 +143,22 @@ srs_error_t SrsStatisticStream::dumps(SrsJsonObject* obj)
         obj->set("video", video);
         
         video->set("codec", SrsJsonAny::str(srs_video_codec_id2str(vcodec).c_str()));
-        video->set("profile", SrsJsonAny::str(srs_avc_profile2str(avc_profile).c_str()));
-        video->set("level", SrsJsonAny::str(srs_avc_level2str(avc_level).c_str()));
+
+        if (vcodec == SrsVideoCodecIdAVC){
+            video->set("profile", SrsJsonAny::str(srs_avc_profile2str(avc_profile).c_str()));
+            video->set("level", SrsJsonAny::str(srs_avc_level2str(avc_level).c_str()));
+        }
+#ifdef SRS_H265
+        else if (vcodec == SrsVideoCodecIdHEVC){
+            video->set("profile", SrsJsonAny::str(srs_hevc_profile2str(hevc_profile).c_str()));
+            video->set("level", SrsJsonAny::str(srs_hevc_level2str(hevc_level).c_str()));            
+        }
+#endif        
+        else{
+            video->set("profile", SrsJsonAny::str("Other"));
+            video->set("level", SrsJsonAny::str("Other"));
+        }
+
         video->set("width", SrsJsonAny::integer(width));
         video->set("height", SrsJsonAny::integer(height));
     }
@@ -352,6 +366,26 @@ srs_error_t SrsStatistic::on_video_info(SrsRequest* req, SrsVideoCodecId vcodec,
     
     return err;
 }
+
+#ifdef SRS_H265
+srs_error_t SrsStatistic::on_video_info(SrsRequest* req, SrsVideoCodecId vcodec, SrsHevcProfile hevc_profile, SrsHevcLevel hevc_level, int width, int height)
+{
+    srs_error_t err = srs_success;
+
+    SrsStatisticVhost* vhost = create_vhost(req);
+    SrsStatisticStream* stream = create_stream(vhost, req);
+
+    stream->has_video = true;
+    stream->vcodec = vcodec;
+    stream->hevc_profile = hevc_profile;
+    stream->hevc_level = hevc_level;
+
+    stream->width = width;
+    stream->height = height;
+
+    return err;
+}
+#endif
 
 srs_error_t SrsStatistic::on_audio_info(SrsRequest* req, SrsAudioCodecId acodec, SrsAudioSampleRate asample_rate, SrsAudioChannels asound_type, SrsAacObjectType aac_object)
 {
